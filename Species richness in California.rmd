@@ -1,0 +1,109 @@
+---
+title: "Species richness in California"
+author: "Liraz Bistritz"
+date: "2025-04-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(terra)
+library(raster)
+library(sf)
+library(tidyverse)
+```
+
+###Species richness:###
+
+#These following layers were created using the same methods, the difference is in the filtration of species included in the layer:
+Wildlife species richness
+Federally threatened and endangered vertebrate species richness
+Forest raptor species richness
+Open range raptor species richness
+Hummingbird species richness
+Functional Species Richness
+
+#species ranges can be downloaded from https://map.dfg.ca.gov/metadata/ds0897.html
+
+#Instructions to download the species_habitats table from CWHR:
+A full habitat suitability table for all CWHR species can be downloaded from the CWHR web application (https://apps.wildlife.ca.gov/cwhr/index.shtml) through the query function accessible through the Query tab. For Query type, select ‘Single Condition.’ Note that CWHR queries default to selecting all options when none are chosen. Therefore, a user can quickly navigate through the following series of query option pages to construct the most inclusive possible query by simply selecting the ‘Next’ option at right to advance to the next page without selecting any other options. This will include all counties, habitat types and structural classes, habitat elements, species, species legal statuses, and seasons in the query by simply choosing ‘Next’ 6 times consecutively. A user may also choose to constrain the query by selecting any options on any of the pages before advancing to the next page. On the final query page, choose ‘Report Type: Detailed.’ You may Sort on any of the available attributes. Choose ‘Run’ to engage the query which may take several minutes to complete. There is a small wheel within the thin blue ‘CWHR’ bar above the query tabs which will be active when the query is running. When complete, the query results are displayed below. You now have the option to give the results a file name in the ‘PDF/CSV Output Filename’ user entry box. Choose PDF, or to enable use of results as a spreadsheet choose CSV. Check your downloads folder to retrieve your file.
+
+```{r}
+#Creating the richness layer: For each one of the 721 species, reclassifying the base layer, so that every cell will be assigned 1 if it's suitable for the species, or 0 if not.
+#Clipping the richness raster by the range raster, using ifel(range ==1, richness, 0)
+
+dir <- "~/" #directory where the CWHR table, landscape boundary, base layer and species' ranges are located
+output_dir <- "~/" #set the directory to which your outputs will be saved
+
+CA <- terra::rast(paste0(dir,"CA_boundary.tif")) #the boundary
+
+base_layer <- rast(paste0(dir, "base_layer_cc_size_veg.tif")) %>%
+  terra::project(CA, method="near") %>%
+  terra::crop(CA) #the base layer, includes a unique numeric ID to each canopy_cover-size-vegetation combination. The ID needs to match with the IDs in the habitat table (a new column that needs to be created, named 'unique_hab_ID').
+
+base_layer_mask <- ifel(base_layer > 0, 1, NA) #creating a mask
+
+df <- read.csv(paste0(dir, "CWHR_habitat.csv"))
+df$ID <- tolower(df$ID) #convert IDs to lower case
+df <- df %>%
+  arrange(df$ID)
+
+#df <- df %>%
+#  dplyr::filter(df$ID %in% species)
+
+species <- df$ID #creating a species list
+species <- unique(species)
+species
+
+start.time <- Sys.time()
+for (i in species) {
+  df_i <- df %>%
+    dplyr::filter(REPRO == "H" & ID==i) #keep unique_hab_ID that are highly suitable for that species
+  
+  df_i <- df_i %>%
+    dplyr::select("unique_hab_ID") %>%
+    na.omit() %>%
+    unique()
+  
+  df_i["presence"] <- 1 #create a presence column, with '1' in all rows
+  
+  richness <- classify(base_layer, df_i, others=0) #reclassify the base layer. cc_size_veg combinations that are suitable for that species are reclassified to 1, others to 0.
+  
+  writeRaster(richness, paste0(dir, i,".tif"), overwrite=T, datatype='INT1U') #saving the output
+  
+  sp_range <- rast(paste0(dir, i, ".tif")) %>%
+    terra::project(CA, method="near") %>%
+    terra::crop(CA) #the species' range raster
+  
+  richness2 <- ifel(sp_range == 1, richness, 0) #keep only suitable habitat pixels that are within the species' range
+  
+  richness2 <- mask(richness2, base_layer_mask) #masking out NA areas in the base layer
+  
+  writeRaster(richness2, paste0(dir, "species_richness_within_range/", i,".tif"), overwrite=T, datatype='INT1U') #saving the output
+}
+end.time <- Sys.time()
+time.taken <- round(end.time - start.time,2)
+time.taken
+```
+
+```{r}
+#Overall species richness: summing the species richness layers:
+#sum all the rasters created in the chunk above
+
+final_output_dir <- "~/" #the output to which the final richness layer will be saved
+
+files <- list.files(paste0(dir, "species_richness_within_range/"), pattern="*.tif$", full.names=TRUE) #list the folder to which the individual species richness layers, clipped to the species' range, were saved.
+
+rasters <- lapply(files, rast) #read all rasters into a list
+
+raster_stack <- rast(rasters) #stack all rasters together
+
+raster_sum <- sum(raster_stack, na.rm=T)
+plot(raster_sum)
+
+writeRaster(raster_sum, paste0(final_output_dir, "wildlife_species_richness.tif"), overwrite=T, datatype='INT2U') #saving the output
+```
